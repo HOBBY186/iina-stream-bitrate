@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  body { font-family: -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif; }
+  #panel {
+    position: absolute; top: 16px; left: 16px;
+    width: 264px;
+    transform: scale(0.8);
+    transform-origin: top left;
+    background: rgba(0, 0, 0, 0.82);
+    border-radius: 8px;
+    padding: 10px 12px 8px;
+    color: #eee;
+    -webkit-backdrop-filter: blur(6px);
+  }
+  #panel.right { left: auto; right: 16px; transform-origin: top right; }
+  #title {
+    font-size: 10px; font-weight: 600; letter-spacing: 0.5px;
+    color: #aaa; text-transform: uppercase;
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 6px;
+  }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: #888; }
+  #dot.green  { background: #2ecc71; box-shadow: 0 0 5px #2ecc71; }
+  #dot.yellow { background: #f1c40f; box-shadow: 0 0 5px #f1c40f; }
+  #dot.red    { background: #e74c3c; box-shadow: 0 0 5px #e74c3c; }
+  #dot.gray   { background: #888; }
+  canvas { display: block; width: 240px; height: 64px; }
+  #rows { margin-top: 7px; font-size: 11px; line-height: 1.65; }
+  .row { display: flex; justify-content: space-between; }
+  .row .k { color: #999; }
+  .row .v { font-variant-numeric: tabular-nums; font-weight: 500; }
+  #bufval.green  { color: #2ecc71; }
+  #bufval.yellow { color: #f1c40f; }
+  #bufval.red    { color: #e74c3c; }
+  #bufval.gray   { color: #999; }
+  .hdr-badge {
+    margin-left: 5px;
+    padding: 0 4px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 700;
+    color: #000;
+    background: linear-gradient(90deg, #ffd54f, #ffab40);
+  }
+  #legend { margin-top: 5px; font-size: 9px; color: #777; display: flex; gap: 10px; }
+  .sw { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 3px; vertical-align: -1px; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <div id="title"><span>网络带宽健康度</span><span id="dot" class="gray"></span></div>
+  <canvas id="graph"></canvas>
+  <div id="rows">
+    <div class="row"><span class="k">连接速度</span><span class="v" id="speed">—</span></div>
+    <div class="row"><span class="k">缓冲健康度</span><span class="v" id="bufval">—</span></div>
+    <div class="row"><span class="k">播放码率</span><span class="v" id="bitrate">—</span></div>
+    <div class="row"><span class="k">视频格式</span><span class="v"><span id="vres"></span> <span id="codec">—</span><span id="hdrBadge" class="hdr-badge" style="display:none"></span></span></div>
+  </div>
+  <div id="legend">
+    <span><span class="sw" style="background:#5a8dd6"></span>连接速度</span>
+    <span><span class="sw" style="background:#2ecc71"></span>≥10s</span>
+    <span><span class="sw" style="background:#f1c40f"></span>3–10s</span>
+    <span><span class="sw" style="background:#e74c3c"></span>&lt;3s</span>
+  </div>
+</div>
+<script>
+(function () {
+  const N = 60;               // keep 60 samples (~1 min)
+  const samples = [];         // { speed: B/s, buf: seconds, health: "green"|"yellow"|"red"|"gray" }
+  const COLORS = { green: "#2ecc71", yellow: "#f1c40f", red: "#e74c3c", gray: "#888" };
+
+  const panel = document.getElementById("panel");
+  const dot = document.getElementById("dot");
+  const elSpeed = document.getElementById("speed");
+  const elBuf = document.getElementById("bufval");
+  const elBitrate = document.getElementById("bitrate");
+  const elCodec = document.getElementById("codec");
+  const elVres = document.getElementById("vres");
+  const elHdr = document.getElementById("hdrBadge");
+  const canvas = document.getElementById("graph");
+  const ctx = canvas.getContext("2d");
+
+  const W = 240, H = 64;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  ctx.scale(dpr, dpr);
+
+  let unit = "auto";
+
+  function fmt(bytesPerSec) {
+    if (bytesPerSec == null || isNaN(bytesPerSec) || bytesPerSec < 0) return "—";
+    const bps = bytesPerSec * 8;
+    if (unit === "MBs") return (bytesPerSec / 1048576).toFixed(2) + " MB/s";
+    if (unit === "Mbps") return (bps / 1e6).toFixed(2) + " Mbps";
+    if (bps >= 1e6) return (bps / 1e6).toFixed(2) + " Mbps";
+    if (bps >= 1e3) return (bps / 1e3).toFixed(0) + " Kbps";
+    return bps.toFixed(0) + " bps";
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // grid lines (25/50/75%)
+    ctx.strokeStyle = "rgba(255,255,255,0.08)";
+    ctx.lineWidth = 1;
+    for (let i = 1; i <= 3; i++) {
+      const y = H * i / 4;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    }
+    if (!samples.length) return;
+
+    const bw = W / N;
+    const maxSpeed = Math.max(1, ...samples.map(s => s.speed || 0));
+    const bufScale = Math.max(30, ...samples.map(s => s.buf || 0));
+
+    // bandwidth bars, right-aligned (newest at right)
+    const off = N - samples.length;
+    ctx.fillStyle = "rgba(90,141,214,0.55)";
+    samples.forEach((s, i) => {
+      const h = Math.max(1, (s.speed || 0) / maxSpeed * (H - 4));
+      ctx.fillRect((off + i) * bw + 0.5, H - h, Math.max(1, bw - 1), h);
+    });
+
+    // buffer-health line, colored per segment
+    ctx.lineWidth = 1.8;
+    ctx.lineJoin = "round";
+    for (let i = 1; i < samples.length; i++) {
+      const x0 = (off + i - 1) * bw + bw / 2, x1 = (off + i) * bw + bw / 2;
+      const y0 = H - (samples[i - 1].buf || 0) / bufScale * (H - 4);
+      const y1 = H - (samples[i].buf || 0) / bufScale * (H - 4);
+      ctx.strokeStyle = COLORS[samples[i].health] || COLORS.gray;
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    }
+    // current point
+    const last = samples[samples.length - 1];
+    const lx = (off + samples.length - 1) * bw + bw / 2;
+    const ly = H - (last.buf || 0) / bufScale * (H - 4);
+    ctx.fillStyle = COLORS[last.health] || COLORS.gray;
+    ctx.beginPath(); ctx.arc(lx, ly, 2.5, 0, Math.PI * 2); ctx.fill();
+  }
+
+  window.iina.onMessage("stats", function (d) {
+    if (d.reset) { samples.length = 0; draw(); }
+    if (d.unit) unit = d.unit;
+    if (d.position) panel.classList.toggle("right", d.position === "right");
+    if (d.speed == null) return;
+
+    samples.push({ speed: d.speed, buf: d.buf, health: d.health });
+    if (samples.length > N) samples.shift();
+
+    dot.className = d.health;
+    elSpeed.textContent = d.paused ? "已暂停" : fmt(d.speed);
+    elBuf.textContent = d.buf != null && d.buf >= 0 ? d.buf.toFixed(1) + " s" : "—";
+    elBuf.className = "v " + d.health;
+    elBitrate.textContent = d.bitrate > 0 ? fmt(d.bitrate / 8) : "—";
+    elCodec.textContent = d.codec || "—";
+    elVres.textContent = d.res || "";
+    if (d.hdr) { elHdr.textContent = d.hdr; elHdr.style.display = "inline-block"; }
+    else { elHdr.style.display = "none"; }
+    if (d.stalling) elBuf.textContent = "缓冲中…";
+    draw();
+  });
+})();
+</script>
+</body>
+</html>

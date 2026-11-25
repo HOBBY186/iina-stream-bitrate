@@ -1,0 +1,14 @@
+{
+  "name": "Stream Bitrate HUD",
+  "identifier": "com.cenwentao.stream-bitrate",
+  "version": "2.0.0",
+  "description": "YouTube-style network bandwidth health graph for online streams",
+  "author": { "name": "cenwentao" },
+  "entry": "index.js",
+  "preferencesPage": "preferences.html",
+  "preferenceDefaults": {
+    "position": "left",
+    "unit": "auto"
+  },
+  "permissions": ["video-overlay", "show-osd"]
+}
